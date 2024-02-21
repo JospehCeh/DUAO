@@ -16,7 +16,7 @@ DIR_PHOTOM = 'Photometry'
 DIR_SPECTRO = 'Spectroscopy'
 DIR_ASTER = 'Asteroids'
 DIR_CALIB = 'CCD__BIAS_DARKS_FLATS'
-C2PU_DATA_DIR = '/home/etudiant/Documents/C2PU_DATA'
+C2PU_DATA_DIR = '/home/etudiant/Documents/Archives_C2PU'
 
 def get_calib_dirs_photometry(fits_image_path):
     hdu = fits.open(fits_image_path)[0]
@@ -45,6 +45,8 @@ def get_calib_dirs_photometry(fits_image_path):
     
     all_flats_filts = os.listdir(flats_dir)
     for _filt in all_flats_filts:
-        if acq_filter.lowercase() in _filt.lowercase() : flats_dir = os.path.join(flats_dir, _filt)
+        if (acq_filter.lower() == "") and ("none" in _filt.lower()) : flats_dir = os.path.join(flats_dir, _filt)
+        elif acq_filter.lower() in _filt.lower() : flats_dir = os.path.join(flats_dir, _filt)
+        
     
     return bias_dir, darks_dir, flats_dir

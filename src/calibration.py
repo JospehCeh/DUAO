@@ -37,35 +37,36 @@ def get_infos_from_image(fits_image_path):
 def check_obs_night(date, date_ref):
     time_delta = date - date_ref
     print(time_delta)
-    return abs(time_delta.days) < 1
+    return abs(time_delta.days) <= 7
 
-def load_bias_frames(path_to_bias_dir, aq_date, aq_cam, size_x, size_y):
+def load_bias_frames(path_to_bias_dir, aq_date, aq_cam, size_x, size_y, override_date_check=False):
     _path = os.path.abspath(path_to_bias_dir)
     bias_frames_list = []
     for _file in os.listdir(_path):
         _fpath = os.path.join(_path, _file)
         _dat, _scope, _cam, _filt, _dur, _x, _y = get_infos_from_image(_fpath)
-        if _x==size_x and _y==size_y: # check_obs_night removed to allow tests...
+        if (check_obs_night(_dat, aq_date) or override_date_check) and _x==size_x and _y==size_y:
             bias_frames_list.append(_fpath)
     return bias_frames_list
 
-def load_dark_frames(path_to_darks_dir, aq_date, aq_cam, expos_time, size_x, size_y):
+def load_dark_frames(path_to_darks_dir, aq_date, aq_cam, expos_time, size_x, size_y, override_date_check=False):
     _path = os.path.abspath(path_to_darks_dir)
     dark_frames_list = []
     for _file in os.listdir(_path):
         _fpath = os.path.join(_path, _file)
         _dat, _scope, _cam, _filt, _dur, _x, _y = get_infos_from_image(_fpath)
-        if _x==size_x and _y==size_y and _dur==expos_time: # check_obs_night removed to allow tests...
+        if (check_obs_night(_dat, aq_date) or override_date_check) and _x==size_x and _y==size_y and _dur==expos_time:
             dark_frames_list.append(_fpath)
     return dark_frames_list
 
-def load_flat_frames(path_to_flats_dir, aq_date, aq_cam, aq_filter, size_x, size_y):
+def load_flat_frames(path_to_flats_dir, aq_date, aq_cam, aq_filter, size_x, size_y, override_date_check=False):
     _path = os.path.abspath(path_to_flats_dir)
     flat_frames_list = []
     for _file in os.listdir(_path):
         _fpath = os.path.join(_path, _file)
         _dat, _scope, _cam, _filt, _dur, _x, _y = get_infos_from_image(_fpath)
-        if _x==size_x and _y==size_y and _filt==aq_filter: # check_obs_night removed to allow tests... check on exposure time too
+        if (check_obs_night(_dat, aq_date) or override_date_check)\
+          and _x==size_x and _y==size_y and _filt==aq_filter:
             flat_frames_list.append(_fpath)
     return flat_frames_list
 
@@ -78,7 +79,11 @@ def master_bias(bias_frames_list):
     # Load frames
     bias_array = np.empty((len(bias_frames_list), _x, _y))
     for it, _file in enumerate(bias_frames_list):
-        bias_array[it, :, :] = fits.getdata(_file, ext=0)
+        _open_hdu = fits.open(_file)[0]
+        try:
+            bias_array[it, :, :] = _open_hdu.data
+        except ValueError:
+            bias_array[it, :, :] = np.transpose(_open_hdu.data)
     
     # Master bias = median of the bias images
     master_bias_as_array = np.median(bias_array, axis=0)
@@ -90,18 +95,28 @@ def master_bias(bias_frames_list):
     fits_open_hdu.writeto(write_path, overwrite=True)
     print(f"Master BIAS written to {write_path}.")
     
-    return {"path":write_path, "daata":master_bias_as_array}
+    return {"path":write_path, "data":master_bias_as_array}
 
-def master_dark(dark_frames_list):
+def master_dark(dark_frames_list, use_bias=False, master_bias=""):
     # Get parent directory and hdu info
     fits_open_hdu = fits.open(dark_frames_list[0])[0]
     darks_dir = os.path.dirname(dark_frames_list[0])
     _dat, _scope, camera, _filt, exposure, _x, _y = get_infos_from_image(dark_frames_list[0])
     
+    mb_data = np.zeros((_x, _y))
+    if use_bias:
+        # Get parent directory and hdu info
+        mb_hdu = fits.open(master_bias)[0]
+        mb_data += mb_hdu.data
+        
     # Load frames
     darks_array = np.empty((len(dark_frames_list), _x, _y))
     for it, _file in enumerate(dark_frames_list):
-        darks_array[it, :, :] = fits.getdata(_file, ext=0)
+        _open_hdu = fits.open(_file)[0]
+        try:
+            darks_array[it, :, :] = _open_hdu.data - mb_data
+        except ValueError:
+            darks_array[it, :, :] = np.transpose(_open_hdu.data) - mb_data
     
     # Master bias = median of the bias images
     master_dark_as_array = np.median(darks_array, axis=0)
@@ -155,7 +170,11 @@ def master_flat(flat_frames_list, master_dark_path):
         flat_hdu = fits.open(_file)[0]
         # Remove master dark, rescaled as necessary to account for exposure variations
         exp_ratio = flat_hdu.header.get('EXPTIME') / md_hdu.header.get('EXPTIME')
-        scaled_flat = flat_hdu.data - exp_ratio*md_hdu.data
+        
+        try:
+            scaled_flat = flat_hdu.data - exp_ratio*md_hdu.data
+        except ValueError:
+            scaled_flat = np.transpose(flat_hdu.data) - exp_ratio*md_hdu.data
         flats_array[it, :, :] = scaled_flat / np.mean(scaled_flat)
     
     # Master bias = median of the bias images
@@ -196,7 +215,7 @@ def master_flat(flat_frames_list, master_dark_path):
     
     return {"path":mf_write_path, "data":master_flat_as_array}, {"path":dp_write_path, "data":dead_pixels_map}
 
-def reduce_sci_image(fits_image, use_bias=False):
+def reduce_sci_image(fits_image, path_to_darks_dir, path_to_flats_dir, path_to_bias_dir="", use_bias=False):
     # Get image directory, failename and extension
     sc_im_dir = os.path.abspath(os.path.dirname(fits_image))
     sc_im_name, sc_im_ext = os.path.splitext(os.path.basename(fits_image))
@@ -209,31 +228,39 @@ def reduce_sci_image(fits_image, use_bias=False):
     # - D+1 and 00:00:00 <= HH:MM:SS <= 11:59:59
     # TBD
     
-    # Master dark
-    # TBD: check if there is already one that works
-    path_to_darks_dir = os.path.join(sc_im_dir, '..', 'darks')
-    darks_list = load_dark_frames(path_to_darks_dir, sc_date, sc_cam, sc_expos, sc_x, sc_y)
-    MASTER_DARK, HOT_PIXELS = master_dark(darks_list)
-    
-    # Master flat
-    # TBD: check if there is already one that works
-    path_to_flats_dir = os.path.join(sc_im_dir, '..', 'flats')
-    flats_list = load_flat_frames(path_to_flats_dir, sc_date, sc_cam, sc_filter, sc_x, sc_y)
-    MASTER_FLAT, DEAD_PIXELS = master_flat(flats_list, MASTER_DARK["path"])
-    
-    additive_corr = MASTER_DARK["data"]
-    
     # BIAS is included in DARK unless exposure time of DARK is not significant
     if use_bias:    
         # Master bias
         # TBD: check if there is already one that works
-        path_to_bias_dir = os.path.join(sc_im_dir, '..', 'bias')
+        #path_to_bias_dir = os.path.join(sc_im_dir, '..', 'bias')
         bias_list = load_bias_frames(path_to_bias_dir, sc_date, sc_cam, sc_x, sc_y)
         MASTER_BIAS = master_bias(bias_list)
-        additive_corr -= MASTER_BIAS["data"]
+        
+        # Master dark
+        # TBD: check if there is already one that works
+        #path_to_darks_dir = os.path.join(sc_im_dir, '..', 'darks')
+        darks_list = load_dark_frames(path_to_darks_dir, sc_date, sc_cam, sc_expos, sc_x, sc_y)
+        MASTER_DARK, HOT_PIXELS = master_dark(darks_list, use_bias=True, master_bias=MASTER_BIAS["path"])
+        additive_corr = MASTER_DARK["data"] - MASTER_BIAS["data"]
+    else:
+        # Master dark
+        # TBD: check if there is already one that works
+        #path_to_darks_dir = os.path.join(sc_im_dir, '..', 'darks')
+        darks_list = load_dark_frames(path_to_darks_dir, sc_date, sc_cam, sc_expos, sc_x, sc_y)
+        MASTER_DARK, HOT_PIXELS = master_dark(darks_list)
+        additive_corr = MASTER_DARK["data"]
+    
+    # Master flat
+    # TBD: check if there is already one that works
+    #path_to_flats_dir = os.path.join(sc_im_dir, '..', 'flats')
+    flats_list = load_flat_frames(path_to_flats_dir, sc_date, sc_cam, sc_filter, sc_x, sc_y)
+    MASTER_FLAT, DEAD_PIXELS = master_flat(flats_list, MASTER_DARK["path"])
     
     sc_hdu = fits.open(fits_image)[0]
-    RED_SCIENCE = (sc_hdu.data - additive_corr) / MASTER_FLAT["data"]
+    try:
+        RED_SCIENCE = (sc_hdu.data - additive_corr) / MASTER_FLAT["data"]
+    except ValueError:
+        RED_SCIENCE = (np.transpose(sc_hdu.data) - additive_corr) / MASTER_FLAT["data"]
     
     # Clean bad pixels
     smoothed = median_filter(RED_SCIENCE, size=(5,5))
