@@ -77,7 +77,7 @@ def master_bias(bias_frames_list):
     _dat, _scope, camera, _filt, _dur, _x, _y = get_infos_from_image(bias_frames_list[0])
     
     # Load frames
-    bias_array = np.empty((len(bias_frames_list), _x, _y))
+    bias_array = np.empty((len(bias_frames_list), *fits_open_hdu.data.shape))
     for it, _file in enumerate(bias_frames_list):
         _open_hdu = fits.open(_file)[0]
         try:
@@ -91,7 +91,9 @@ def master_bias(bias_frames_list):
     # Write appropriate FITS files
     date = _dat.date().isoformat()
     fits_open_hdu.data = master_bias_as_array
-    write_path = os.path.join(bias_dir, f'master_bias_{date}_{camera}.fits')
+    mb_dir = os.path.join(os.path.abspath(bias_dir), 'MASTER_BIAS')
+    if not os.path.isdir(mb_dir) : os.makedirs(mb_dir)
+    write_path = os.path.join(mb_dir, f'master_bias_{date}_{camera}.fits')
     fits_open_hdu.writeto(write_path, overwrite=True)
     print(f"Master BIAS written to {write_path}.")
     
@@ -103,23 +105,23 @@ def master_dark(dark_frames_list, use_bias=False, master_bias=""):
     darks_dir = os.path.dirname(dark_frames_list[0])
     _dat, _scope, camera, _filt, exposure, _x, _y = get_infos_from_image(dark_frames_list[0])
     
-    mb_data = np.zeros((_x, _y))
+    mb_data = np.zeros_like(fits_open_hdu.data)
     if use_bias:
         # Get parent directory and hdu info
         mb_hdu = fits.open(master_bias)[0]
         mb_data += mb_hdu.data
         
     # Load frames
-    darks_array = np.empty((len(dark_frames_list), _x, _y))
+    darks_array = np.empty((len(dark_frames_list), *fits_open_hdu.data.shape))
     for it, _file in enumerate(dark_frames_list):
         _open_hdu = fits.open(_file)[0]
         try:
-            darks_array[it, :, :] = _open_hdu.data - mb_data
+            darks_array[it, :, :] = _open_hdu.data
         except ValueError:
-            darks_array[it, :, :] = np.transpose(_open_hdu.data) - mb_data
+            darks_array[it, :, :] = np.transpose(_open_hdu.data)
     
     # Master bias = median of the bias images
-    master_dark_as_array = np.median(darks_array, axis=0)
+    master_dark_as_array = np.median(darks_array, axis=0) - mb_data
     
     # Sigma-clipped statistics to detect hot pixels
     bkg_mean, bkg_median, bkg_sigma = sigma_clipped_stats(master_dark_as_array, sigma=3.0)
@@ -144,12 +146,14 @@ def master_dark(dark_frames_list, use_bias=False, master_bias=""):
     # Write appropriate FITS files
     date = _dat.date().isoformat()
     fits_open_hdu.data = master_dark_as_array
-    md_write_path = os.path.join(os.path.abspath(darks_dir), f'master_dark_{date}_{camera}_{exposure:.3f}.fits')
+    md_dir = os.path.join(os.path.abspath(darks_dir), 'MASTER_DARKS')
+    if not os.path.isdir(md_dir) : os.makedirs(md_dir)
+    md_write_path = os.path.join(md_dir, f'master_dark_{date}_{camera}_{exposure:.3f}.fits')
     fits_open_hdu.writeto(md_write_path, overwrite=True)
     print(f"Master DARK written to {md_write_path}.")
 
     fits_open_hdu.data = hot_pixels_map
-    hp_write_path = os.path.join(os.path.abspath(darks_dir), f'bad_pixels_hot_{date}_{camera}.fits')
+    hp_write_path = os.path.join(md_dir, f'bad_pixels_hot_{date}_{camera}.fits')
     fits_open_hdu.writeto(hp_write_path, overwrite=True)
     print(f"Hot pixels map written to {hp_write_path}.")
     
@@ -165,7 +169,7 @@ def master_flat(flat_frames_list, master_dark_path):
     md_hdu = fits.open(master_dark_path)[0]
     
     # Load frames
-    flats_array = np.empty((len(flat_frames_list), _x, _y))
+    flats_array = np.empty((len(flat_frames_list), *fits_open_hdu.data.shape))
     for it, _file in enumerate(flat_frames_list):
         flat_hdu = fits.open(_file)[0]
         # Remove master dark, rescaled as necessary to account for exposure variations
@@ -204,12 +208,14 @@ def master_flat(flat_frames_list, master_dark_path):
     # Write appropriate FITS files
     date = _dat.date().isoformat()
     fits_open_hdu.data = master_flat_as_array
-    mf_write_path = os.path.join(os.path.abspath(flats_dir), f'master_flat_{date}_{camera}_{band}_{exposure:.3f}.fits')
+    mf_dir = os.path.join(os.path.abspath(flats_dir), 'MASTER_FLATS')
+    if not os.path.isdir(mf_dir) : os.makedirs(mf_dir)
+    mf_write_path = os.path.join(mf_dir, f'master_flat_{date}_{camera}_{band}_{exposure:.3f}.fits')
     fits_open_hdu.writeto(mf_write_path, overwrite=True)
     print(f"Master FLAT written to {mf_write_path}.")
 
     fits_open_hdu.data = dead_pixels_map
-    dp_write_path = os.path.join(os.path.abspath(flats_dir), f'bad_pixels_dead_{date}_{camera}.fits')
+    dp_write_path = os.path.join(mf_dir, f'bad_pixels_dead_{date}_{camera}.fits')
     fits_open_hdu.writeto(dp_write_path, overwrite=True)
     print(f"Dead pixels map written to {dp_write_path}.")
     
@@ -260,7 +266,7 @@ def reduce_sci_image(fits_image, path_to_darks_dir, path_to_flats_dir, path_to_b
     try:
         RED_SCIENCE = (sc_hdu.data - additive_corr) / MASTER_FLAT["data"]
     except ValueError:
-        RED_SCIENCE = (np.transpose(sc_hdu.data) - additive_corr) / MASTER_FLAT["data"]
+        RED_SCIENCE = (sc_hdu.data - np.transpose(additive_corr)) / np.transpose(MASTER_FLAT["data"])
     
     # Clean bad pixels
     smoothed = median_filter(RED_SCIENCE, size=(5,5))
@@ -291,7 +297,9 @@ def reduce_sci_image(fits_image, path_to_darks_dir, path_to_flats_dir, path_to_b
     red_hdu.header["HOT_PIXELS"] = HOT_PIXELS["path"]
     red_hdu.header["DEAD_PIXELS"] = DEAD_PIXELS["path"]
     if use_bias: red_hdu.header["MASTER_BIAS"] = MASTER_BIAS["path"]
-    write_path = os.path.join(sc_im_dir, new_fn)
+    redim_dir = os.path.join(os.path.abspath(sc_im_dir), 'REDUCED')
+    if not os.path.isdir(redim_dir) : os.makedirs(redim_dir)
+    write_path = os.path.join(redim_dir, new_fn)
     red_hdu.writeto(write_path, overwrite=True)
     print(f"Calibrated image written to {write_path}.")
     
